@@ -1,0 +1,155 @@
+totalordering
+-------------
+
+0. Requirement
+
+A website that processes online orders with high concurrent traffic requires
+an order ID scheme of the format <date>-<sequential number> such as in
+"YYYYMMDD-nnnnn". Following this scheme, the first 2 orders for today would have
+the IDs 20200718-00001 and 20200718-00002, and then the next day the sequential
+number would restart from 1. It is necessary that they are unique. Please devise
+some logic/design that would allow for the assignment of these IDs, ensuring
+that they do not collide, accounting for the possibility that both orders are
+processed at virtually the exact same time.
+
+Please use Django / Python for your solution. The logic and thought process
+demonstrated are the most important considerations rather than truly functional
+code, however code presentation is important as well as the technical aspect.
+If you cannot settle on a single perfect solution, you may also discuss
+alternative solutions to demonstrate your understanding of potential trade-offs
+as you encounter them. Of course if you consider a solution is too time
+consuming you are also welcome to clarify or elaborate on potential improvements
+or multiple solution approaches conceptually to demonstrate understanding and
+planned solution.
+
+1. Install & Setup
+
+# mysql
+
+podman run --name some-mysql -e MYSQL_ROOT_PASSWORD=my-secret-pw -p 33306:3306 -d mysql:5.7
+
+login to mysql shell and create database: `CREATE DATABASE totalordering;`
+
+# virtualenv
+
+python -m venv .venv
+source .venv/bin/activate
+
+# install
+
+pip install -e .
+
+# start gunicorn
+
+gunicorn --threads 256 totalordering.wsgi:application --preload --reload --access-logfile -
+
+2. Testing
+
+# On browser
+
+Accessing browser via http://localhost:8000/orders
+
+Click `Order` button to create an order.
+
+# `ab` benchmark
+
+ab -n 100 -c 100 -m POST localhost:8000/orders/
+
+This is ApacheBench, Version 2.3 <$Revision: 1903618 $>
+Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
+Licensed to The Apache Software Foundation, http://www.apache.org/
+
+Benchmarking localhost (be patient).....done
+
+
+Server Software:        gunicorn
+Server Hostname:        localhost
+Server Port:            8000
+
+Document Path:          /orders/
+Document Length:        14 bytes
+
+Concurrency Level:      100
+Time taken for tests:   0.191 seconds
+Complete requests:      100
+Failed requests:        0
+Total transferred:      25300 bytes
+HTML transferred:       1400 bytes
+Requests per second:    522.80 [#/sec] (mean)
+Time per request:       191.277 [ms] (mean)
+Time per request:       1.913 [ms] (mean, across all concurrent requests)
+Transfer rate:          129.17 [Kbytes/sec] received
+
+Connection Times (ms)
+              min  mean[+/-sd] median   max
+Connect:        0    2   0.5      2       3
+Processing:    34  117  32.2    127     158
+Waiting:       30  104  36.5    111     157
+Total:         34  119  31.8    128     159
+
+Percentage of the requests served within a certain time (ms)
+  50%    128
+  66%    133
+  75%    145
+  80%    154
+  90%    155
+  95%    156
+  98%    158
+  99%    159
+ 100%    159 (longest request)
+
+3. Explanation
+
+This work is based on my read of Designing Data-Intensive Application's
+Transaction section.
+
+It's hard to design the uniqueness of order's ids under high concurrency, so I
+will ship it to database to do the hard work.
+
+# What could be wrong?
+
+i. The lost update problem
+If we do it in the application, by fetching the last order of the day and
+then plus 1, then insert to database, then concurent requests could have the
+same last order, end up multiple inserts have a same new id.
+It's called The lost update problem.
+
+ii. Unique index
+The uniqueness of the primary key prevents the duplications but there's will
+be requests to be failed and users have to retried.
+We can bump the order number and insert until successful in a while loop but it
+will have performance impact.
+
+iii. Materializing conflicts
+This method is about creating a table with prefill order ids for up coming like,
+6 months.
+
++----------------+--------+
+| id             | picked |
++----------------+--------+
+| 20240412-00001 | t      |
+| 20240412-00002 | t      |
+| 20240412-00003 | t      |
+| 20240412-00004 | t      |
+| 20240412-00005 | t      |
+| 20240412-00006 | f      |
+| 20240412-00007 | f      |
+| 20240412-00008 | f      |
+| 20240412-00009 | f      |
+| 20240412-00010 | f      |
+| 20240412-00011 | f      |
+...
+| 20241012-99999 | f      |
++----------------+--------+
+
+Once a new order requested, you query all order ids for the day which are not
+picked, lock those records, pick the first one, insert into orders table and
+release the lock.
+
+SELECT * FROM prefill_order_ids WHERE id LIKE '20240412%' AND picked = false LIMIT 1 FOR UPDATE;
+
+The method helps reduce manual retries from users, but because the query locks
+all rows matched (LIMIT 1 does not prevent the lock), it also has performance
+impact. Beside, maintaining the table is a drawback.
+
+iv. My solution - daily sequence table
