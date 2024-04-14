@@ -22,6 +22,7 @@ consuming you are also welcome to clarify or elaborate on potential improvements
 or multiple solution approaches conceptually to demonstrate understanding and
 planned solution.
 
+
 1. Install & Setup
 
 # mysql
@@ -42,6 +43,7 @@ pip install -e .
 # start gunicorn
 
 gunicorn --threads 256 totalordering.wsgi:application --preload --reload --access-logfile -
+
 
 2. Testing
 
@@ -98,27 +100,28 @@ Percentage of the requests served within a certain time (ms)
   99%    159
  100%    159 (longest request)
 
+
 3. Explanation
 
 This work is based on my read of Designing Data-Intensive Application's
 Transaction section.
 
-It's hard to design the uniqueness of order's ids under high concurrency, so I
+It's hard to design the uniqueness of orders' ids under high concurrency, so I
 will ship it to database to do the hard work.
 
 # What could be wrong?
 
 i. The lost update problem
-If we do it in the application, by fetching the last order of the day and
-then plus 1, then insert to database, then concurent requests could have the
-same last order, end up multiple inserts have a same new id.
+If we do it in application layer, by fetching the last order of the day at the
+moment and then plus 1, then insert to database -- then concurent requests could
+have the same last order, end up multiple inserts have a same new id.
 It's called The lost update problem.
 
 ii. Unique index
-The uniqueness of the primary key prevents the duplications but there's will
-be requests to be failed and users have to retried.
-We can bump the order number and insert until successful in a while loop but it
-will have performance impact.
+The uniqueness of the ids prevents the duplication but there's will be failed
+requests and users have to retry. We can bump the order number and insert until
+successful in a while loop but it will have performance impact and the worse
+could be deadlocks.
 
 iii. Materializing conflicts
 This method is about creating a table with prefill order ids for up coming like,
@@ -150,6 +153,17 @@ SELECT * FROM prefill_order_ids WHERE id LIKE '20240412%' AND picked = false LIM
 
 The method helps reduce manual retries from users, but because the query locks
 all rows matched (LIMIT 1 does not prevent the lock), it also has performance
-impact. Beside, maintaining the table is a drawback.
+impact. Beside, maintaining the table is another drawback.
 
 iv. My solution - daily sequence table
+The daily order sequence table created on the first request of the day with a
+single auto increment int id column. Each request's inserted id retrieved by
+`SELECT LAST_INSERT_ID();` and then it will be used to indicate the order's id.
+
+The auto increment column can handle high concurrency thank to
+`innodb_autoinc_lock_mode = 2` (default on MySQL > 8). So there could be no lock
+at all.
+
+The drawback is same with the third solution but I think it's easier. The table
+only has single field and doesn't have any indexes. We can have a simple cron to
+clean it up monthly, or even weekly.
